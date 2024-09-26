@@ -1,4 +1,5 @@
 require {
-  github.com/diku-dk/sml-matrix 0.0.0-20240923221058+ecbe2a5cb4a7e4c6cc0f52916a0fa0b791318e0c
+  github.com/diku-dk/sml-matrix 0.1.0 #06c58c733525071eb137f5ce5e61c330fdda890c
   github.com/diku-dk/sml-complex 0.1.1 #d299435ed7b18db66ff15760e11b446fdc7d50e5
+  github.com/diku-dk/sml-random 0.1.1 #0a0f79c857207f948e89e18b320f162e30e1fdaf
 }
