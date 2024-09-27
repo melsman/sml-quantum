@@ -2,19 +2,21 @@
 (* Gates *)
 
 signature QUANTUM = sig
-  type t                          (* Circuits *)
+  type t                          (* Gates *)
   val I            : t            (* Identity *)
   val X            : t            (* Pauli X *)
   val Y            : t            (* Pauli Y *)
   val Z            : t            (* Pauli Z *)
   val H            : t            (* Hadamard *)
+  val T            : t            (* T *)
   val C            : t -> t       (* Control *)
+  val SW           : t            (* Swap two qbits *)
   val **           : t * t -> t   (* Tensor product *)
   val oo           : t * t -> t   (* Composition *)
 
-  val ppC          : t -> string
+  val ppG          : t -> string
 
-  val check        : t -> int * int
+  val check        : t -> int     (* Returns the arity of a gate *)
 
   type ket
   val ket          : int list -> ket
@@ -29,6 +31,7 @@ signature QUANTUM = sig
   val ppDist       : dist -> string
   val measure      : state -> ket          (* Random measure *)
   val measurements : int -> state -> dist  (* Run many measurements *)
+  val measureDist  : state -> dist
 
   type complex = Complex.complex
   type mat = complex Matrix.t
@@ -41,39 +44,38 @@ structure Quantum :> QUANTUM = struct
 infix |>
 fun x |> f = f x
 
-datatype t = I | X | Y | Z | H
+datatype t = I | X | Y | Z | H | T | SW
            | Tensor of t * t
            | Compose of t * t
            | C of t
 
-fun ppC t =
-    case t of
-        I => "I" | X => "X" | Y => "Y" | Z => "Z" | H => "H"
-        | Tensor(t1,t2) => ppC t1 ^ " ** " ^ ppC t2
-        | Compose(t1,t2) => ppC t1 ^ " oo " ^ ppC t2
-                          | C t => "C(" ^ ppC t ^ ")"
+fun ppG t =
+    let fun maybePar p s = if p > 0 then "(" ^ s ^ ")" else s
+        fun pp p t =
+            case t of
+                I => "I" | X => "X" | Y => "Y" | Z => "Z" | H => "H" | T => "T" | SW => "SW"
+                | Tensor(t1,t2) => maybePar (p-4) (pp 4 t1 ^ " * " ^ pp 4 t2)
+                | Compose(t1,t2) => maybePar (p-3) (pp 3 t1 ^ " o " ^ pp 3 t2)
+                | C t => maybePar (p-10) ("C" ^ pp 10 t)
+    in pp 0 t
+    end
 
 val op ** = Tensor
 val op oo = Compose
 
-fun check (t:t) : int * int =
+(* check returns the arity of a gate *)
+
+fun check (t:t) : int =
     case t of
-        Tensor (t1,t2) =>
-        let val (i1,o1) = check t1
-            val (i2,o2) = check t2
-        in (i1*i2,o1*o2)
-        end
+        Tensor (t1,t2) => check t1 * check t2
       | Compose (t1,t2) =>
-        let val (i1,o1) = check t1
-            val (i2,o2) = check t2
-        in if o1 <> i2 then raise Fail "Compose failure"
-           else (i1,o2)
+        let val a = check t1
+        in if a = check t2 then a
+           else raise Fail "Compose failure: different arities"
         end
-      | C t' =>
-        let val (i',o') = check t'
-        in (1+i',1+o')
-        end
-      | _ => (1,1)
+      | C t' => check t' + 1
+      | SW => 2
+      | _ => 1
 
 structure C = Complex
 structure M = Matrix
@@ -91,10 +93,9 @@ fun pow2 0 = 1
 
 type ket = int list
 fun ket xs = xs
-fun init (is: int list) : state =
-    let val v = Vector.fromList is
-        val i = Vector.foldli(fn (i,x,a) => x * pow2 i + a) 0 v
-    in Vector.tabulate(pow2 (Vector.length v),
+fun init (is: ket) : state =
+    let val i = foldl (fn (x,a) => 2 * a + x) 0 is
+    in Vector.tabulate(pow2 (length is),
                        fn j => if i = j then one() else zero())
     end
 
@@ -134,17 +135,36 @@ fun opH () = M.tabulate(2,2,fn(r,c) => let val rsqrt2 = C.fromRe (1.0 / Math.sqr
                                        in if r = 1 andalso c = 1 then C.~ rsqrt2
                                           else rsqrt2
                                        end)
+fun opT () = M.tabulate(2,2,fn (0,0) => C.fromInt 1
+                             | (1,1) => C.exp(C.fromIm(Math.pi / 4.0))
+                             | _ => C.fromInt 0)
 
-fun opC t = raise Fail "Control: not implemented"
+fun opSW () = M.tabulate(4,4,fn (0,0) => C.fromInt 1
+                              | (3,3) => C.fromInt 1
+                              | (2,1) => C.fromInt 1
+                              | (1,2) => C.fromInt 1
+                              | _ => C.fromInt 0)
 
-fun sem (t:t) : mat =
+fun opC t =
+    if check t = 1 then
+      let val m = sem t
+      in M.tabulate(4,4, fn (r,c) => if r > 1 andalso c > 1 then
+                                       M.sub(m,r-2,c-2)
+                                     else if r = c then C.fromInt 1
+                                     else C.fromInt 0)
+      end
+    else raise Fail "Control: not implemented"
+
+and sem (t:t) : mat =
     case t of
         I => opI()
       | X => opX()
       | Y => opY()
       | Z => opZ()
       | H => opH()
+      | T => opT()
       | C t => opC t
+      | SW => opSW()
       | Compose(t1,t2) => matmul(sem t1,sem t2)
       | Tensor(t1,t2) => tensor(sem t1,sem t2)
 
@@ -214,18 +234,35 @@ fun measurements N s : dist =
              val () = for N (fn () =>
                                 let val i = measure0 s
                                 in Array.update(a,i,Array.sub(a,i)+1)
-                           end)
+                                end)
              val n = log2 (Vector.length s)
          in Vector.tabulate(Array.length a,
                             fn i => (toKet n i, real (Array.sub(a,i)) / real N))
          end
 
+fun dist (s:state) : real vector =
+    let fun square r = r * r
+    in Vector.map (square o Complex.mag) s
+    end
+
+fun measureDist (s:state) : dist =
+    let val v = dist s
+        val n = log2 (Vector.length s)
+    in Vector.mapi (fn (i,p) => (toKet n i, p)) v
+    end
+
 val $ = map (map Complex.fromInt)
+val m1 = M.fromListList ($[[0,1],[1,0]])
+val m2 = M.fromListList ($[[1,0],[0,1]])
+val m3 = tensor (m1, m2)
+val () = print (ppM m3 ^ "\n")
+
+(*
 val m1 = M.fromListList ($[[1,2,3],[4,5,6]])
 val m2 = M.fromListList ($[[7,8],[9,10]])
 val m3 = tensor (m1, m2)
 val () = print (ppM m3 ^ "\n")
-
+*)
 end
 
 
@@ -233,17 +270,19 @@ structure Test = struct
 
   open Quantum
 
-  fun runSystem (c:t) k N =
-      let val () = print ("Semantics of c = " ^ ppC c ^ ":\n")
-          val () = print (ppM (sem c) ^ "\n")
+  fun runSystem (g:t) k N =
+      let val () = print ("Semantics of g = " ^ ppG g ^ ":\n")
+          val () = print (ppM (sem g) ^ "\n")
 
           val s = init k
           val () = print ("Initial state s: " ^ ppS s ^ "\n")
-          val s' = eval c s
-          val () = print ("eval c " ^ ppK k ^ " = " ^ ppS s' ^ "\n")
+          val s' = eval g s
+          val () = print ("eval g " ^ ppK k ^ " = " ^ ppS s' ^ "\n")
 
           val () = print ("Distribution of " ^ Int.toString N ^ " measurements:\n")
           val () = print (ppDist(measurements N s') ^ "\n")
+          val () = print ("Derived distribution:\n")
+          val () = print (ppDist(measureDist s') ^ "\n")
           val () = print "-----------------------------------\n"
       in ()
       end
@@ -259,5 +298,11 @@ structure Test = struct
   val () = runSystem ((H oo H) ** I) (ket[0,1]) 1000
 
   val () = runSystem (I ** I) (ket[0,1]) 1000
+
+  val () = runSystem (I ** T) (ket[0,1]) 1000
+
+  val () = runSystem ((I ** T) oo SW) (ket[0,1]) 1000
+
+  val () = runSystem (C X) (ket[1,0]) 1000   (* CNOT: |00> -> |00>, |01> -> |01>, |10> -> |11>, |11> -> |10> *)
 
 end
